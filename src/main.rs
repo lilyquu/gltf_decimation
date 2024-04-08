@@ -1,7 +1,7 @@
 use std::path::Path;
+use std::env;
 use std::fs::File;
-use std::io::{Read, prelude::*};
-use std::io;
+use std::io::{self, Write, Read, prelude::*};
 use serde_json::{json, Value, Number, to_vec};
 use std::hash::{Hash, Hasher};
 use nalgebra::{Vector2, Vector3, Vector4, Unit};
@@ -91,10 +91,24 @@ impl Vertex {
 }
 
 fn main() {
+    // Get command-line arguments
+    let args: Vec<String> = env::args().collect();
+
+    // Check if the correct number of arguments are provided
+    if args.len() != 4 {
+        eprintln!("Usage: {} <file_path> <method> <limit>", args[0]);
+    }
+    let path = Path::new(&args[1]);
+    let method = &args[2];
+    let limit: f64 = match args[3].parse() {
+        Ok(n) => n,
+        Err(..) => todo!(),
+    };
+
     // Takes input value
-    let path = Path::new("./assets/test.glb");
-    let method = "percent";
-    let limit = 0.1;
+    //let path = Path::new("./assets/test.glb");
+    //let method = "percent";
+    //let limit = 0.1;
 
     // Exam file format
     match path.extension().and_then(|f| f.to_str()).unwrap() {
