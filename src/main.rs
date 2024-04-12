@@ -2,11 +2,13 @@ use std::path::Path;
 use std::env;
 use std::fs::File;
 use std::io::{self, Write, Read, prelude::*};
-use serde_json::{json, Value, Number, to_vec};
+use serde_json::{json, Value, Number, to_vec, Map};
 use std::hash::{Hash, Hasher};
-use nalgebra::{Vector2, Vector3, Vector4, Unit};
+use nalgebra::{Matrix1x4, Matrix4, Matrix4x1, Unit, Vector2, Vector3, Vector4};
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::{Reverse, Ordering};
+use indexmap::IndexMap;
+use json::JsonValue;
 
 #[derive(Debug)]
 struct Remove(u32, u32, f32);
@@ -105,15 +107,10 @@ fn main() {
         Err(..) => todo!(),
     };
 
-    // Takes input value
-    //let path = Path::new("./assets/test.glb");
-    //let method = "percent";
-    //let limit = 0.1;
-
     // Exam file format
     match path.extension().and_then(|f| f.to_str()).unwrap() {
         "gltf"| "glb" => decimation_gltf(&path, &method, limit),
-        &_ => todo!(),
+        &_ => eprintln!("not a valid glb file"),
     }
 }
 
@@ -136,17 +133,45 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
         "max" => goal = std::cmp::min(goal, (tri_num - limit as u32) as usize),
         &_ => todo!(),
     }
+
     // Start iteration of vertex removement
     let mut index_ref = Vec::with_capacity(position_list.len());
     for i in 0..position_list.len() {
         index_ref.push(true);
     }
+
+    // Remove duplicate position vertex
+    for i in 0..position_list.len() {
+        for j in i+1..position_list.len() {
+            if position_list.get(&(i as u32)) == position_list.get(&(j as u32)) {
+                println!("duplicate position vertices");
+                position_list.remove(&(j as u32));
+                normal_list.remove(&(j as u32));
+                vertex_list.remove(&(j as u32));
+                texcoord_0_list.remove(&(j as u32));
+                for k in 0..index_list.len() {
+                    if index_list[k] == j as u32 {
+                        index_list[k] = i as u32;
+                    }
+                }
+                index_ref[j] = false;
+            }
+        }
+    }
+
     while goal > 0 {
         println!("need reduce: {}", goal);
         println!("{}", remove_list.len());
         let mut remove = remove_list.pop().unwrap().0;
         println!("{:?}", remove);
-        while !index_ref[remove.0 as usize] && !index_ref[remove.1 as usize] {
+        while !index_ref[remove.0 as usize] || !index_ref[remove.1 as usize] {
+            remove = remove_list.pop().unwrap().0;
+            println!("{:?}", remove);
+        }
+        while vertex_list.get(&remove.1).unwrap().edge_set.len() < 3 ||
+                vertex_list.get(&remove.0).unwrap().edge_set.len() < 3 ||
+                vertex_list.get(&remove.0).unwrap().face_set.len() < 2 ||
+                vertex_list.get(&remove.1).unwrap().face_set.len() < 2{
             remove = remove_list.pop().unwrap().0;
             println!("{:?}", remove);
         }
@@ -175,7 +200,7 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
             } else if edge[0] == remove.1 {
                 edge_set.push(Vector2::new(remove.0, edge[1]));
             } else if edge[1] == remove.1 {
-                edge_set.push(Vector2::new(edge[1], remove.0));
+                edge_set.push(Vector2::new(edge[0], remove.0));
             } else {
                 edge_set.push(*edge);
             }
@@ -196,66 +221,54 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
             } else if edge[0] == remove.1 {
                 edge_set.push(Vector2::new(remove.0, edge[1]));
             } else if edge[1] == remove.1 {
-                edge_set.push(Vector2::new(edge[1], remove.0));
+                edge_set.push(Vector2::new(edge[0], remove.0));
             } else {
                 edge_set.push(*edge);
             }
         }
         let mut face_set:Vec<Vector3<u32>> = Vec::new();
         for face in &v1.face_set {
-            if face[0] == remove.0 {
-                if face[1] == remove.1 || face[2] == remove.1 {
+            if face[0] == remove.1 {
+                if face[1] == remove.0 || face[2] == remove.0 {
                     continue;
                 } else {
-                    face_set.push(*face);
+                    face_set.push(Vector3::new(remove.0, face[1], face[2]));
                 }
-            } else if face[1] == remove.0 {
-                if face[0] == remove.1 || face[2] == remove.1 {
-                    continue;
-                } else {
-                    face_set.push(*face);
-                }
-            } else if face[2] == remove.0 {
-                if face[0] == remove.1 || face[1] == remove.1 {
-                    continue;
-                } else {
-                    face_set.push(*face);
-                }
-            } else if face[0] == remove.1 {
-                face_set.push(Vector3::new(remove.0, face[1], face[2]));
             } else if face[1] == remove.1 {
-                face_set.push(Vector3::new(face[0], remove.0, face[2]));
+                if face[0] == remove.0 || face[2] == remove.0 {
+                    continue;
+                } else {
+                    face_set.push(Vector3::new(face[0], remove.0, face[2]));
+                }
             } else if face[2] == remove.1 {
-                face_set.push(Vector3::new(face[0], face[1], remove.0));
+                if face[0] == remove.0 || face[1] == remove.0 {
+                    continue;
+                } else {
+                    face_set.push(Vector3::new(face[0], face[1], remove.0));
+                }
             } else {
                 face_set.push(*face);
             }
         }
         for face in &v2.face_set {
-            if face[0] == remove.0 {
-                if face[1] == remove.1 || face[2] == remove.1 {
-                    continue;
+            if face[0] == remove.1 {
+                if face[1] == remove.0 || face[2] == remove.0 {
+                    println!("remove a face");
                 } else {
-                    face_set.push(*face);
+                    face_set.push(Vector3::new(remove.0, face[1], face[2]));
                 }
-            } else if face[1] == remove.0 {
-                if face[0] == remove.1 || face[2] == remove.1 {
-                    continue;
-                } else {
-                    face_set.push(*face);
-                }
-            } else if face[2] == remove.0 {
-                if face[0] == remove.1 || face[1] == remove.1 {
-                    continue;
-                } else {
-                    face_set.push(*face);
-                }
-            } else if face[0] == remove.1 {
-                face_set.push(Vector3::new(remove.0, face[1], face[2]));
             } else if face[1] == remove.1 {
-                face_set.push(Vector3::new(face[0], remove.0, face[2]));
+                if face[0] == remove.0 || face[2] == remove.0 {
+                    println!("remove a face");
+                } else {
+                    face_set.push(Vector3::new(face[0], remove.0, face[2]));
+                }
             } else if face[2] == remove.1 {
-                face_set.push(Vector3::new(face[0], face[1], remove.0));
+                if face[0] == remove.0 || face[1] == remove.0 {
+                    println!("remove a face");
+                } else {
+                    face_set.push(Vector3::new(face[0], face[1], remove.0));
+                }
             } else {
                 face_set.push(*face);
             }
@@ -266,10 +279,12 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
         // position
         let p1 = position_list.get(&remove.0).unwrap();
         let p2 = position_list.get(&remove.1).unwrap();
-        let new_p = Vector3::new((p1[0]+p2[0])/2.0, (p1[1]+p2[1])/2.0, (p1[2]+p2[2])/2.0);
+        let mut new_p = Vector3::new((p1[0]+p2[0])/2.0, (p1[1]+p2[1])/2.0, (p1[2]+p2[2])/2.0);
+        println!("old pos: {:?}, {:?} ; new pos: {:?}", p1, p2, new_p);
         position_list.remove(&remove.0);
         position_list.remove(&remove.1);
         position_list.insert(remove.0, new_p);
+
         // normal
         let n1 = normal_list.get(&remove.0).unwrap();
         let n2 = normal_list.get(&remove.1).unwrap();
@@ -299,7 +314,9 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
             if (index_list[i*3] == remove.0 && index_list[i*3+1] == remove.0) || 
                 (index_list[i*3+1] == remove.0 && index_list[i*3+2] == remove.0) ||
                 (index_list[i*3] == remove.0 && index_list[i*3+2] == remove.0) {
-                goal = goal-1;
+                if goal > 0 {
+                    goal = goal-1;
+                }
             } else {
                 in_list.push(index_list[i*3]);
                 in_list.push(index_list[i*3+1]);
@@ -308,7 +325,7 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
         }
         index_list.clear();
         index_list = in_list;
-        println!("new index list: {:?}", index_list);
+        //println!("new index list: {:?}", index_list);
 
         // Update new cost
         let mut temp_list: BinaryHeap<Reverse<Remove>> = BinaryHeap::new();
@@ -325,7 +342,11 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
                         let new_pos = Vector3::new(p1[0]+p2[0]/2.0, p1[1]+p2[1]/2.0, p1[2]+p2[2]/2.0);
                         let q1 = &vertex_list.get(&value.0.0).unwrap().q_matrix;
                         let q2 = &vertex_list.get(&value.0.1).unwrap().q_matrix;
-                        temp_list.push(Reverse(Remove(value.0.0, value.0.1, update_cost(q1, q2, &new_pos))));
+                        if value.0.0 < value.0.1 {
+                            temp_list.push(Reverse(Remove(value.0.0, value.0.1, update_cost(q1, q2, &new_pos))));
+                        } else {
+                            temp_list.push(Reverse(Remove(value.0.1, value.0.0, update_cost(q2, q1, &new_pos))));
+                        }
                     }
                 }
             } else if value.0.1 == remove.1 {
@@ -339,7 +360,11 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
                         let new_pos = Vector3::new(p1[0]+p2[0]/2.0, p1[1]+p2[1]/2.0, p1[2]+p2[2]/2.0);
                         let q1 = &vertex_list.get(&value.0.0).unwrap().q_matrix;
                         let q2 = &vertex_list.get(&value.0.1).unwrap().q_matrix;
-                        temp_list.push(Reverse(Remove(value.0.0, value.0.1, update_cost(q1, q2, &new_pos))));
+                        if value.0.0 < value.0.1 {
+                            temp_list.push(Reverse(Remove(value.0.0, value.0.1, update_cost(q1, q2, &new_pos))));
+                        } else {
+                            temp_list.push(Reverse(Remove(value.0.1, value.0.0, update_cost(q2, q1, &new_pos))));
+                        }                    
                     }
                 }
             } else if value.0.0 == remove.0 || value.0.1 == remove.0 {
@@ -349,7 +374,11 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
                     let new_pos = Vector3::new(p1[0]+p2[0]/2.0, p1[1]+p2[1]/2.0, p1[2]+p2[2]/2.0);
                     let q1 = &vertex_list.get(&value.0.0).unwrap().q_matrix;
                     let q2 = &vertex_list.get(&value.0.1).unwrap().q_matrix;
-                    temp_list.push(Reverse(Remove(value.0.0, value.0.1, update_cost(q1, q2, &new_pos))));
+                    if value.0.0 < value.0.1 {
+                        temp_list.push(Reverse(Remove(value.0.0, value.0.1, update_cost(q1, q2, &new_pos))));
+                    } else {
+                        temp_list.push(Reverse(Remove(value.0.1, value.0.0, update_cost(q2, q1, &new_pos))));
+                    }                
                 }
             } else {
                 if index_ref[value.0.0 as usize] && index_ref[value.0.1 as usize]  {
@@ -360,17 +389,17 @@ fn decimation_gltf(path:&Path, method:&str, limit:f64) {
         remove_list = temp_list;
     }
     // Finished decimation
-    println!("indices elements numnber is: {}. \n{:?}", index_list.len(), index_list);
-    println!("normal elements numnber is: {}. \n{:?}", normal_list.len(), normal_list);
-    println!("position elements numnber is: {}. \n{:?}", position_list.len(), position_list);
-    println!("texcoord_0 elements numnber is: {}. \n{:?}", texcoord_0_list.len(), texcoord_0_list);
+    //println!("indices elements numnber is: {}. \n{:?}", index_list.len(), index_list);
+    //println!("normal elements numnber is: {}. \n{:?}", normal_list.len(), normal_list);
+    //println!("position elements numnber is: {}. \n{:?}", position_list.len(), position_list);
+    //println!("texcoord_0 elements numnber is: {}. \n{:?}", texcoord_0_list.len(), texcoord_0_list);
 
     // Write the new glb file
     println!("{}", serde_json::to_string_pretty(&json).unwrap());
     let file = repack_gltf(json, index_ref, index_list, &normal_list, &position_list, &texcoord_0_list, &primitives);
 }
 
-fn repack_gltf(mut json:Value, index_ref:Vec<bool>, index_list:Vec<u32>,
+fn repack_gltf(mut json:Value, mut index_ref:Vec<bool>, index_list:Vec<u32>,
                 normal_list:&HashMap<u32, Vector3<f32>>, position_list:&HashMap<u32, Vector3<f32>>,
                 texcoord_0_list:&HashMap<u32, Vector2<f32>>, 
                 primitives:&HashMap<String,Prim>) -> Result<File, std::io::Error> {
@@ -379,93 +408,93 @@ fn repack_gltf(mut json:Value, index_ref:Vec<bool>, index_list:Vec<u32>,
 
     // edit json part
     let index = if let Some(mut index) = json["meshes"][0]["primitives"][0]["indices"].as_i64(){
-        println!("Indices at : {}", index);
+        //println!("Indices at : {}", index);
         index
     } else {
         println!("No Indices");
         -1
     };
     let normal = if let Some(normal) = json["meshes"][0]["primitives"][0]["attributes"]["NORMAL"].as_i64(){
-        println!("NORMAL at : {}", normal);
+        //println!("NORMAL at : {}", normal);
         normal
     } else {
         println!("No NORMAL");
         -1
     };
     let position = if let Some(position) = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"].as_i64(){
-        println!("POSITION at : {}", position);
+        //println!("POSITION at : {}", position);
         position
     } else {
         println!("No POSITION");
         -1
     };
     let tangent = if let Some(tangent) = json["meshes"][0]["primitives"][0]["attributes"]["TANGENT"].as_i64(){
-        println!("TANGENT at : {}", tangent);
+        //println!("TANGENT at : {}", tangent);
         tangent
     } else {
         println!("No TANGENT");
         -1
     };
     let texcoord_0 = if let Some(texcoord_0) = json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"].as_i64(){
-        println!("TEXCOORD_0 at : {}", texcoord_0);
+        //println!("TEXCOORD_0 at : {}", texcoord_0);
         texcoord_0
     } else {
         println!("No TEXCOORD_0");
         -1
     };
 
-    json["accessors"][index as usize]["count"] = json!(index_list.len());
-    json["accessors"][normal as usize]["count"] = json!(normal_list.len());
-    json["accessors"][position as usize]["count"] = json!(position_list.len());
-    json["accessors"][texcoord_0 as usize]["count"] = json!(texcoord_0_list.len());
-
     let indices = primitives.get("indices").unwrap();
     let NORMAL = primitives.get("NORMAL").unwrap();
     let POSITION = primitives.get("POSITION").unwrap();
     let TEXCOORD_0 = primitives.get("TEXCOORD_0").unwrap();
 
-    json["bufferViews"][indices.bufferView as usize]["byteLength"] = json!(index_list.len()*12);
-    json["bufferViews"][NORMAL.bufferView as usize]["byteLength"] = json!(normal_list.len()*12);
-    json["bufferViews"][POSITION.bufferView as usize]["byteLength"] = json!(position_list.len()*12);
-    json["bufferViews"][TEXCOORD_0.bufferView as usize]["byteLength"] = json!(texcoord_0_list.len()*8);
-
-    let mut offset = 0;
-    for i in 0..4 {
-        if index == i {
-            json["bufferViews"][indices.bufferView as usize]["byteOffset"] = json!(offset);
-            offset = offset + index_list.len()*12;
-        } else if normal == i {
-            json["bufferViews"][NORMAL.bufferView as usize]["byteOffset"] = json!(offset);
-            offset = offset + normal_list.len()*12;
-        } else if position == i {
-            json["bufferViews"][POSITION.bufferView as usize]["byteOffset"] = json!(offset);
-            offset = offset + position_list.len()*12;
-        } else if texcoord_0 == i {
-            json["bufferViews"][TEXCOORD_0.bufferView as usize]["byteOffset"] = json!(offset);
-            offset = offset + texcoord_0_list.len()*8;
-        }
-    }
-    json["buffers"][0]["byteLength"] = json!(offset);
-
-    let json_data = &to_vec(&json).unwrap();
-    let json_chunk_length = json_data.len() as u32;
 
     // TODO
     // write the binary part
     let mut binary_data = Vec::new();
     let mut new_index_list = Vec::new();
     let mut new_index = HashMap::new();
+    let mut new_index_ref = HashMap::new();
+    // create the new index reference
+    for i in 0..index_ref.len() {
+        index_ref[i] = false;
+    }
+    for i in 0..index_list.len() {
+        index_ref[index_list[i] as usize] = true;
+    }
+    let mut k = 0;
+    for i in 0..index_ref.len() {
+        if index_ref[i] == true {
+            new_index.insert(i, k);
+            new_index_ref.insert(k, i);
+            k = k+1;
+        }
+    }
+    let mut index_number = 0;
+    let mut exist:Vec<u32> = Vec::new();
+    for i in 0..index_list.len() {
+        new_index_list.push(*new_index.get(&(index_list[i] as usize)).unwrap());
+        let mut same = false;
+        for j in 0..exist.len() {
+            if index_list[i] == exist[j] {
+                same = true;
+            }
+        }
+        if same == false {
+            index_number = index_number + 1;
+            exist.push(index_list[i]);
+        }
+    }
+    println!("index list: {}, {:?}", index_list.len(), index_list);
+    println!("position list: {}, {:?}", position_list.len(), position_list);
+    println!("new index ref: {:?}", new_index_ref);
+    println!("new index list: {:?}", new_index_list);
+    println!("index number: {:?}", index_number);
     for i in 0..4 {
         if indices.bufferView == i {
-            let mut k = 0;
-            for i in 0..index_ref.len() {
-                if index_ref[i] == true {
-                    new_index.insert(i, k);
-                    k = k+1;
-                }
-            }
-            for i in 0..index_list.len() {
-                new_index_list.push(*new_index.get(&(index_list[i] as usize)).unwrap());
+            println!("indices to binary");
+            for i in 0..new_index_list.len() {
+                //new_index_list.push(*new_index.get(&(index_list[i] as usize)).unwrap());
                 match primitives.get("indices").unwrap().componentType {
                     5121 => {
                         let bytes = (new_index_list[i] as u8).to_le_bytes();
@@ -490,13 +519,10 @@ fn repack_gltf(mut json:Value, index_ref:Vec<bool>, index_list:Vec<u32>,
                     _ => todo!()
                 }
             }
-            //for &value in &f32_values {
-            //    let bytes = value.to_le_bytes();
-            //    binary_data.extend_from_slice(&bytes);
-            //}
         } else if NORMAL.bufferView == i {
-            for i in 0..new_index_list.len() {
-                let nor = normal_list.get(&(i as u32));
+            println!("NORMAL to binary");
+            for i in 0..index_number {
+                let nor = normal_list.get(&(*new_index_ref.get(&i).unwrap() as u32));
                 let bytesx = nor.unwrap().x.to_le_bytes();
                 binary_data.extend_from_slice(&bytesx);
                 let bytesy = nor.unwrap().y.to_le_bytes();
@@ -505,8 +531,10 @@ fn repack_gltf(mut json:Value, index_ref:Vec<bool>, index_list:Vec<u32>,
                 binary_data.extend_from_slice(&bytesz);
             }
         } else if POSITION.bufferView == i {
-            for i in 0..new_index_list.len() {
-                let pos = position_list.get(&(i as u32));
+            println!("POSITION to binary");
+            println!("position list: {:?}", position_list);
+            for i in 0..index_number {
+                let pos = position_list.get(&(*new_index_ref.get(&i).unwrap() as u32));
                 let bytesx = pos.unwrap().x.to_le_bytes();
                 binary_data.extend_from_slice(&bytesx);
                 let bytesy = pos.unwrap().y.to_le_bytes();
@@ -515,8 +543,9 @@ fn repack_gltf(mut json:Value, index_ref:Vec<bool>, index_list:Vec<u32>,
                 binary_data.extend_from_slice(&bytesz);
             }
         } else if TEXCOORD_0.bufferView == i {
-            for i in 0..new_index_list.len() {
-                let tex0 = texcoord_0_list.get(&(i as u32));
+            println!("TEXCOORD to binary");
+            for i in 0..index_number {
+                let tex0 = texcoord_0_list.get(&(*new_index_ref.get(&i).unwrap() as u32));
                 let bytesx = tex0.unwrap().x.to_le_bytes();
                 binary_data.extend_from_slice(&bytesx);
                 let bytesy = tex0.unwrap().y.to_le_bytes();
@@ -525,11 +554,70 @@ fn repack_gltf(mut json:Value, index_ref:Vec<bool>, index_list:Vec<u32>,
         }
     }
 
+    json["accessors"][index as usize]["count"] = json!(index_list.len());
+    json["accessors"][normal as usize]["count"] = json!(index_number);
+    json["accessors"][position as usize]["count"] = json!(index_number);
+    json["accessors"][texcoord_0 as usize]["count"] = json!(index_number);
+
+    json["bufferViews"][indices.bufferView as usize]["byteLength"] = json!(index_list.len()*2);
+    json["bufferViews"][NORMAL.bufferView as usize]["byteLength"] = json!(index_number*12);
+    json["bufferViews"][POSITION.bufferView as usize]["byteLength"] = json!(index_number*12);
+    json["bufferViews"][TEXCOORD_0.bufferView as usize]["byteLength"] = json!(index_number*8);
+
+    let mut offset = 0;
+    for i in 0..4 {
+        if index == i {
+            json["bufferViews"][indices.bufferView as usize]["byteOffset"] = json!(offset);
+            offset = offset + index_list.len()*2;
+        } else if normal == i {
+            json["bufferViews"][NORMAL.bufferView as usize]["byteOffset"] = json!(offset);
+            offset = offset + index_number*12;
+        } else if position == i {
+            json["bufferViews"][POSITION.bufferView as usize]["byteOffset"] = json!(offset);
+            offset = offset + index_number*12;
+        } else if texcoord_0 == i {
+            json["bufferViews"][TEXCOORD_0.bufferView as usize]["byteOffset"] = json!(offset);
+            offset = offset + index_number*8;
+        }
+    }
+    json["buffers"][0]["byteLength"] = json!(offset);
+
+    // Reorder the json data back to origin
+    // Convert JSON object into an IndexMap
+    let mut index_map = IndexMap::new();
+    if let Value::Object(map) = &json {
+        for (key, value) in map {
+            index_map.insert(key, value);
+        }
+    }
+    
+    // Reorder the IndexMap according to a specific order of keys
+    let mut ordered_index_map = IndexMap::new();
+    for key in ["asset", "scene", "scenes", "nodes", "materials", "meshes", "accessors", "bufferViews", "buffers"] {
+        if let Some((_index, _key, value)) = index_map.swap_remove_full(&String::from(key)) {
+            ordered_index_map.insert((*key).to_string(), value); // Convert borrowed reference to owned String
+        }
+    }
+
+    // Convert the ordered IndexMap back into a JSON object
+    let mut new_json = Map::new();
+    for (key, value) in ordered_index_map.clone() {
+        println!("insert {} to json", key);
+        new_json.insert(key, value.clone());
+    }
+
+    println!("{}", serde_json::to_string_pretty(&new_json).unwrap());
+    let json_data = &to_vec(&new_json).unwrap();
+    let json_chunk_length = json_data.len() as u32;
+
+    println!("binary data: {:?}", binary_data);
     let binary_chunk_length = binary_data.len() as u32;
     let total_length = 12 + 8 + json_chunk_length + 8 + binary_chunk_length;
 
     let file = write_file(filename, version, total_length, json_chunk_length, 
                             json_data, binary_chunk_length, &binary_data);
+    println!("total file size: {} and {} = {}", binary_data.len(), json_data.len(), total_length);
+    println!("length of the file: {:?}", &file);
     file
 }
 
@@ -573,7 +661,7 @@ fn get_valid_edge(index_list:&Vec<u32>, position_list:&HashMap<u32,Vector3<f32>>
             if j > i {
                 let p1 = position_list.get(&(i as u32)).unwrap();
                 let p2 = position_list.get(&(j as u32)).unwrap();
-                if (p1-p2).norm() < 0.001 && (p1-p2).norm() > 0.0 {
+                if (p1-p2).norm() < 0.01 && (p1-p2).norm() > 0.0 {
                     let new_pos = Vector3::new(p1[0]+p2[0]/2.0, p1[1]+p2[1]/2.0, p1[2]+p2[2]/2.0);
                     let q1 = &vertex_list.get(&(i as u32)).unwrap().q_matrix;
                     let q2 = &vertex_list.get(&(j as u32)).unwrap().q_matrix;
@@ -583,29 +671,19 @@ fn get_valid_edge(index_list:&Vec<u32>, position_list:&HashMap<u32,Vector3<f32>>
         }
     }
     // Check by connection
-    for (k,v) in vertex_list {
-        for x in &v.edge_set {
-            if x[1] > x[0] {
-                if !valid_edge.contains_key(&(x[0], x[1])) {
-                    let p1 = position_list.get(&x[0]).unwrap();
-                    let p2 = position_list.get(&x[1]).unwrap();
-                    let new_pos = Vector3::new(p1[0]+p2[0]/2.0, p1[1]+p2[1]/2.0, p1[2]+p2[2]/2.0);
-                    let q1 = &vertex_list.get(&x[0]).unwrap().q_matrix;
-                    let q2 = &vertex_list.get(&x[1]).unwrap().q_matrix;
-                    valid_edge.insert((x[0], x[1]), update_cost(q1, q2, &new_pos));
-
-                }
-            } else {
-                if !valid_edge.contains_key(&(x[1], x[0])) {
-                    let p1 = position_list.get(&x[1]).unwrap();
-                    let p2 = position_list.get(&x[0]).unwrap();
-                    let new_pos = Vector3::new(p1[0]+p2[0]/2.0, p1[1]+p2[1]/2.0, p1[2]+p2[2]/2.0);
-                    let q1 = &vertex_list.get(&x[1]).unwrap().q_matrix;
-                    let q2 = &vertex_list.get(&x[0]).unwrap().q_matrix;
-                    valid_edge.insert((x[1], x[0]), update_cost(q1, q2, &new_pos));
-                }
-            }
-        }
+    for i in 0..index_list.len()/3 {
+        let p1 = position_list.get(&index_list[i*3]).unwrap();
+        let p2 = position_list.get(&index_list[i*3+1]).unwrap();
+        let p3 = position_list.get(&index_list[i*3+2]).unwrap();
+        let q1 = &vertex_list.get(&index_list[i*3]).unwrap().q_matrix;
+        let q2 = &vertex_list.get(&index_list[i*3+1]).unwrap().q_matrix;
+        let q3 = &vertex_list.get(&index_list[i*3+2]).unwrap().q_matrix;
+        let new_pos1 = Vector3::new(p1[0]+p2[0]/2.0, p1[1]+p2[1]/2.0, p1[2]+p2[2]/2.0);
+        let new_pos2 = Vector3::new(p3[0]+p2[0]/2.0, p3[1]+p2[1]/2.0, p3[2]+p2[2]/2.0);
+        let new_pos3 = Vector3::new(p1[0]+p3[0]/2.0, p1[1]+p3[1]/2.0, p1[2]+p3[2]/2.0);
+        valid_edge.insert((index_list[i*3+1], index_list[i*3]), update_cost(q2, q1, &new_pos1));
+        valid_edge.insert((index_list[i*3+2], index_list[i*3+1]), update_cost(q3, q2, &new_pos2));
+        valid_edge.insert((index_list[i*3], index_list[i*3+2]), update_cost(q1, q3, &new_pos3));
     }
     valid_edge
 }
@@ -621,15 +699,47 @@ fn update_cost(q1:&Vec<f32>, q2:&Vec<f32>, new_pos:&Vector3<f32>) -> f32{
     for i in 0..10 {
         q[i] = q1[i] + q2[i];
     }
-    let cost = q[0]*new_pos[0]*new_pos[0] +
-                2.0*q[1]*new_pos[0]*new_pos[1] + 
-                2.0*q[2]*new_pos[0]*new_pos[2] + 
-                2.0*q[3]*new_pos[0] + 
-                q[4]*new_pos[1]*new_pos[1] + 
-                2.0*q[5]*new_pos[1]*new_pos[2] + 
-                2.0*q[6]*new_pos[1] + 
-                q[7]*new_pos[2]*new_pos[2] + 
-                2.0*q[8]*new_pos[2] + q[9];
+    let mut cost = f32::MAX;
+    let matrix_l = Matrix4::new(q[0], q[1], q[2], q[3],
+                                                                    q[1], q[4], q[5], q[6],
+                                                                    q[2], q[5], q[7], q[8],
+                                                                    0.0, 0.0, 0.0, 1.0);
+    // Try if matrix invert exist
+    match matrix_l.try_inverse() {
+        Some(inverse) => {
+            let matrix_r = Matrix4x1::new(0.0, 0.0, 0.0, 1.0);
+            let v = inverse * matrix_r;
+            cost = q[0]*v[0]*v[0] +
+                    2.0*q[1]*v[0]*v[1] + 
+                    2.0*q[2]*v[0]*v[2] + 
+                    2.0*q[3]*v[0] + 
+                    q[4]*v[1]*v[1] + 
+                    2.0*q[5]*v[1]*v[2] + 
+                    2.0*q[6]*v[1] + 
+                    q[7]*v[2]*v[2] + 
+                    2.0*q[8]*v[2] + q[9];
+        },
+        None => {
+            cost = q[0]*new_pos[0]*new_pos[0] +
+                    2.0*q[1]*new_pos[0]*new_pos[1] + 
+                    2.0*q[2]*new_pos[0]*new_pos[2] + 
+                    2.0*q[3]*new_pos[0] + 
+                    q[4]*new_pos[1]*new_pos[1] + 
+                    2.0*q[5]*new_pos[1]*new_pos[2] + 
+                    2.0*q[6]*new_pos[1] + 
+                    q[7]*new_pos[2]*new_pos[2] + 
+                    2.0*q[8]*new_pos[2] + q[9];
+        },
+    }
+    cost = q[0]*new_pos[0]*new_pos[0] +
+    2.0*q[1]*new_pos[0]*new_pos[1] + 
+    2.0*q[2]*new_pos[0]*new_pos[2] + 
+    2.0*q[3]*new_pos[0] + 
+    q[4]*new_pos[1]*new_pos[1] + 
+    2.0*q[5]*new_pos[1]*new_pos[2] + 
+    2.0*q[6]*new_pos[1] + 
+    q[7]*new_pos[2]*new_pos[2] + 
+    2.0*q[8]*new_pos[2] + q[9];
     cost
 }
 
@@ -643,16 +753,16 @@ fn initialize(index_list:&Vec<u32>,  normal_list:&HashMap<u32,Vector3<f32>>,
     let tri_num = index_list.len() / 3;
     let mut k_list:Vec<Vec<f32>> = Vec::with_capacity(tri_num);
     for i in 0..tri_num {
-        let v1 = position_list.get(&index_list[i]).unwrap();
-        let v2 = position_list.get(&index_list[i+1]).unwrap();
-        let v3 = position_list.get(&index_list[i+2]).unwrap();
+        let v1 = position_list.get(&index_list[i*3]).unwrap();
+        let v2 = position_list.get(&index_list[i*3+1]).unwrap();
+        let v3 = position_list.get(&index_list[i*3+2]).unwrap();
         k_list.push(get_k_matrix(v1, v2, v3));
-        println!("k_matrix: {:?}", k_list[i])
+        //println!("k_matrix: {:?}", k_list[i])
     }
-    println!("k_matrix number: {}", k_list.len());
+    //println!("k_matrix number: {}", k_list.len());
 
     // Initialize neighbor edges and faces for each vertex
-    // Calculate the q_matrix of the vertex according to face_set
+    // Calculate the q_matrix of the vertex according to face_set and their k_matrix
     let v_num = position_list.len();
     for i in 0..v_num {
         let mut edge_set: Vec<Vector2<u32>> = Vec::new();
@@ -660,29 +770,53 @@ fn initialize(index_list:&Vec<u32>,  normal_list:&HashMap<u32,Vector3<f32>>,
         let mut q_matrix:Vec<f32> = vec![0.0; 10];
         for j in 0..tri_num {
             if index_list[j*3] == i as u32 {
-                edge_set.push(Vector2::new(index_list[j*3], index_list[j*3+1]));
-                edge_set.push(Vector2::new(index_list[j*3+2], index_list[j*3]));
+                if index_list[j*3] < index_list[j*3+1] {
+                    edge_set.push(Vector2::new(index_list[j*3], index_list[j*3+1]));
+                } else {
+                    edge_set.push(Vector2::new(index_list[j*3+1], index_list[j*3]));
+                }
+                if index_list[j*3+2] < index_list[j*3] {
+                    edge_set.push(Vector2::new(index_list[j*3+2], index_list[j*3]));
+                } else {
+                    edge_set.push(Vector2::new(index_list[j*3], index_list[j*3+2]));
+                }
                 face_set.push(Vector3::new(index_list[j*3],index_list[j*3+1],index_list[j*3+2]));
                 for x in 0..10 {
                     q_matrix[x] = q_matrix[x] + k_list[j][x];
                 }
             } else if index_list[j*3+1] == i as u32 {
-                edge_set.push(Vector2::new(index_list[j*3], index_list[j*3+1]));
-                edge_set.push(Vector2::new(index_list[j*3+1], index_list[j*2]));
+                if index_list[j*3] < index_list[j*3+1] {
+                    edge_set.push(Vector2::new(index_list[j*3], index_list[j*3+1]));
+                } else {
+                    edge_set.push(Vector2::new(index_list[j*3+1], index_list[j*3]));
+                }
+                if index_list[j*3+1] < index_list[j*3+2] {
+                    edge_set.push(Vector2::new(index_list[j*3+1], index_list[j*3+2]));
+                } else {
+                    edge_set.push(Vector2::new(index_list[j*3+2], index_list[j*3+1]));
+                }
                 face_set.push(Vector3::new(index_list[j*3],index_list[j*3+1],index_list[j*3+2]));
                 for x in 0..10 {
                     q_matrix[x] = q_matrix[x] + k_list[j][x];
                 }
             } else if index_list[j*3+2] == i as u32 {
-                edge_set.push(Vector2::new(index_list[j*3+1], index_list[j*3+2]));
-                edge_set.push(Vector2::new(index_list[j*3+2], index_list[j*3]));
+                if index_list[j*3+1] < index_list[j*3+2] {
+                    edge_set.push(Vector2::new(index_list[j*3+1], index_list[j*3+2]));
+                } else {
+                    edge_set.push(Vector2::new(index_list[j*3+2], index_list[j*3+1]));
+                }
+                if index_list[j*3+2] < index_list[j*3] {
+                    edge_set.push(Vector2::new(index_list[j*3+2], index_list[j*3]));
+                } else {
+                    edge_set.push(Vector2::new(index_list[j*3], index_list[j*3+2]));
+                }
                 face_set.push(Vector3::new(index_list[j*3],index_list[j*3+1],index_list[j*3+2]));
                 for x in 0..10 {
                     q_matrix[x] = q_matrix[x] + k_list[j][x];
                 }
             }
         }
-        println!("q_matrix: {:?}", q_matrix);
+        //println!("q_matrix: {:?}", q_matrix);
         vertex_list.insert(i as u32, Vertex::new(edge_set, face_set, q_matrix));
     }
     (vertex_list, tri_num as u32)
@@ -706,7 +840,7 @@ fn get_k_matrix(v1:&Vector3<f32>, v2:&Vector3<f32>, v3:&Vector3<f32>) -> Vec<f32
     //     ab    b^2   bc    bd
     //     ac    bc    c^2   cd
     //     ad    bd    cd    d^2
-    println!("abcd: {}, {}, {}, {}", a, b, c, d);
+    //println!("abcd: {}, {}, {}, {}", a, b, c, d);
     k.push(a*a);
     k.push(a*b);
     k.push(a*c);
@@ -736,7 +870,7 @@ fn unpack_gltf(path:&Path) -> (Vec<u32>, HashMap<u32,Vector3<f32>>, HashMap<u32,
     // Parse the json_chunk as JSON
     let mut json:Value = serde_json::from_slice(json_chunk).expect("Failed to parse JSON");
 
-    // Processing json information into HashMaps of struct
+    // Processing json information into HashMaps of struct Prim
     let mut views:HashMap<i64,View> = HashMap::new();
     let mut primitives:HashMap<String,Prim> = HashMap::new();
     println!("{}", serde_json::to_string_pretty(&json).unwrap());
@@ -758,35 +892,35 @@ fn unpack_gltf(path:&Path) -> (Vec<u32>, HashMap<u32,Vector3<f32>>, HashMap<u32,
     }
 
     let indices = if let Some(mut indices) = json["meshes"][0]["primitives"][0]["indices"].as_i64(){
-        println!("Indices at : {}", indices);
+        //println!("Indices at : {}", indices);
         indices
     } else {
         println!("No Indices");
         -1
     };
     let normal = if let Some(normal) = json["meshes"][0]["primitives"][0]["attributes"]["NORMAL"].as_i64(){
-        println!("NORMAL at : {}", normal);
+        //println!("NORMAL at : {}", normal);
         normal
     } else {
         println!("No NORMAL");
         -1
     };
     let position = if let Some(position) = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"].as_i64(){
-        println!("POSITION at : {}", position);
+        //println!("POSITION at : {}", position);
         position
     } else {
         println!("No POSITION");
         -1
     };
     let tangent = if let Some(tangent) = json["meshes"][0]["primitives"][0]["attributes"]["TANGENT"].as_i64(){
-        println!("TANGENT at : {}", tangent);
+        //println!("TANGENT at : {}", tangent);
         tangent
     } else {
         println!("No TANGENT");
         -1
     };
     let texcoord_0 = if let Some(texcoord_0) = json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"].as_i64(){
-        println!("TEXCOORD_0 at : {}", texcoord_0);
+        //println!("TEXCOORD_0 at : {}", texcoord_0);
         texcoord_0
     } else {
         println!("No TEXCOORD_0");
@@ -813,7 +947,7 @@ fn unpack_gltf(path:&Path) -> (Vec<u32>, HashMap<u32,Vector3<f32>>, HashMap<u32,
             } else if i == texcoord_0{
                 key = String::from("TEXCOORD_0");
             }
-            println!("inserting key: {} at {}", key, i);
+            //println!("inserting key: {} at {}", key, i);
             primitives.insert(key, Prim::new(bufferView, byteOffset, componentType, normalized, count, prim_type));
             i = i+1;
         }
@@ -857,7 +991,7 @@ fn unpack_gltf(path:&Path) -> (Vec<u32>, HashMap<u32,Vector3<f32>>, HashMap<u32,
             }
             _ => todo!(),
         };
-        println!("indices elements numnber is: {}. \n{:?}", index_list.len(), index_list);
+        //println!("indices elements numnber is: {}. \n{:?}", index_list.len(), index_list);
     } else {
         println!("No view found for indices: {}", indices);
     }
@@ -878,7 +1012,7 @@ fn unpack_gltf(path:&Path) -> (Vec<u32>, HashMap<u32,Vector3<f32>>, HashMap<u32,
                                     byte_f32(binary_chunk, (off + i*12+4) as usize),
                                     byte_f32(binary_chunk, (off + i*12+8) as usize)));
             }
-            println!("normal elements numnber is: {}. \n{:?}", normal_list.len(), normal_list);
+            //println!("normal elements numnber is: {}. \n{:?}", normal_list.len(), normal_list);
         }
     }
 
@@ -893,7 +1027,7 @@ fn unpack_gltf(path:&Path) -> (Vec<u32>, HashMap<u32,Vector3<f32>>, HashMap<u32,
                                     byte_f32(binary_chunk, (off + i*12+4) as usize),
                                     byte_f32(binary_chunk, (off + i*12+8) as usize)));
             }
-            println!("position elements numnber is: {}. \n{:?}", position_list.len(), position_list);
+            //println!("position elements numnber is: {}. \n{:?}", position_list.len(), position_list);
         }
     }
 
@@ -909,7 +1043,7 @@ fn unpack_gltf(path:&Path) -> (Vec<u32>, HashMap<u32,Vector3<f32>>, HashMap<u32,
                                     byte_f32(binary_chunk, (off + i*16+8) as usize),
                                     byte_f32(binary_chunk, (off + i*16+12) as usize)));
             }
-            println!("tangent elements numnber is: {}. \n{:?}", tangent_list.len(), tangent_list);
+            //println!("tangent elements numnber is: {}. \n{:?}", tangent_list.len(), tangent_list);
         }
     }
 
@@ -923,7 +1057,7 @@ fn unpack_gltf(path:&Path) -> (Vec<u32>, HashMap<u32,Vector3<f32>>, HashMap<u32,
                 texcoord_0_list.insert(*i,Vector2::new(byte_f32(binary_chunk, (off + i*8) as usize),
                                     byte_f32(binary_chunk, (off + i*8+4) as usize)));
             }
-            println!("texcoord_0 elements numnber is: {}. \n{:?}", texcoord_0_list.len(), texcoord_0_list);
+            //println!("texcoord_0 elements numnber is: {}. \n{:?}", texcoord_0_list.len(), texcoord_0_list);
         }
     }
 
